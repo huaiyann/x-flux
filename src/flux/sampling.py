@@ -138,6 +138,11 @@ def denoise(
     for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
         start = time.time()
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
+        # with torch.profiler.profile(
+        #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        #     record_shapes=True,
+        #     with_stack=True
+        # ) as prof:
         pred = model(
             img=img,
             img_ids=img_ids,
@@ -149,6 +154,7 @@ def denoise(
             image_proj=image_proj,
             ip_scale=ip_scale, 
         )
+        # print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
         middle = time.time()
         if i >= timestep_to_start_cfg:
             neg_pred = model(
