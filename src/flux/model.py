@@ -145,6 +145,7 @@ class Flux(nn.Module):
         for name, module in self.named_children():
             fn_recursive_attn_processor(name, module, processor)
 
+    # @torch.compile
     def forward(
         self,
         img: Tensor,
@@ -194,12 +195,55 @@ class Flux(nn.Module):
         # 创建和double_blocks数量一样的stream
         load_streams = [torch.cuda.Stream() for _ in range(len(self.double_blocks))]
         # 创建新的double_blocks
-        new_double_blocks = nn.ModuleList()
+        new_double_blocks = [None for _ in range(len(self.double_blocks))]
+
+
+        def load_block(origin_blocks, new_blocks, load_streams, index, do_copy=False):
+            if index >= len(origin_blocks):
+                return
+            # if origin_blocks[index].weight.device == self.exec_device:
+            #     return
+            with torch.cuda.stream(load_streams[index]):
+                if not do_copy:
+                    new_block = origin_blocks[index].to(self.exec_device, non_blocking=True)
+                else:
+                    origin_block = origin_blocks[index]
+                    new_block = copy.deepcopy(origin_block).to(self.exec_device, non_blocking=True)
+                new_blocks[index] = new_block
+
+        # # 方法：从源模型复制权重到目标模型
+        # def copy_weights(source_model, target_model):
+        #     # 遍历源模型的所有层和目标模型的所有层
+        #     for source_layer, target_layer in zip(source_model.children(), target_model.children()):
+        #         # if isinstance(source_layer, nn.Linear) and isinstance(target_layer, nn.Linear):
+        #         # 复制权重
+        #         target_layer.weight.data.copy_(source_layer.weight.data.to(target_layer.weight.device))
+        #         # 复制偏置（如果有）
+        #         if source_layer.bias is not None:
+        #             target_layer.bias.data.copy_(source_layer.bias.data.to(target_layer.bias.device))
+
+        # def load_block2(origin_blocks, new_blocks, load_streams, index, do_copy=False):
+        #     if index >= len(origin_blocks):
+        #         return
+        #     with torch.cuda.stream(load_streams[index]):
+        #         if not do_copy:
+        #             new_block = origin_blocks[index].to(self.exec_device, non_blocking=True)
+        #         else:
+        #             origin_block = origin_blocks[index]
+        #             new_block = DoubleStreamBlock(
+        #                 self.hidden_size,
+        #                 self.num_heads,
+        #                 mlp_ratio=self.params.mlp_ratio,
+        #                 qkv_bias=self.params.qkv_bias,
+        #             ).to(self.exec_device).to(next(origin_block.parameters()).dtype)
+        #             copy_weights(origin_block, new_block)
+        #         new_blocks[index] = new_block
+
+        do_copy = False
+        pre_load_n = 1
+
         # 先加载1个double_block
-        with torch.cuda.stream(load_streams[0]):
-            origin_block = self.double_blocks[0]
-            new_block = copy.deepcopy(origin_block).to(self.exec_device, non_blocking=True)
-            new_double_blocks.append(new_block)
+        load_block(self.double_blocks, new_double_blocks, load_streams, 0, do_copy=do_copy)
 
         for index_block, block in enumerate(self.double_blocks):
             if self.training and self.gradient_checkpointing:
@@ -224,13 +268,9 @@ class Flux(nn.Module):
                 )
             else:
                 # 使用stream加载下N个block
-                for i in range(1):
+                for i in range(pre_load_n):
                     next_index = index_block + 1 + i
-                    if next_index < len(self.double_blocks):
-                        with torch.cuda.stream(load_streams[next_index]):
-                            origin_block = self.double_blocks[next_index]
-                            new_block = copy.deepcopy(origin_block).to(self.exec_device, non_blocking=True)
-                            new_double_blocks.append(new_block)
+                    load_block(self.double_blocks, new_double_blocks, load_streams, next_index, do_copy=do_copy)
                 # 等待自己的block加载完成
                 load_streams[index_block].synchronize()
                 # 计算
@@ -243,30 +283,23 @@ class Flux(nn.Module):
                     image_proj=image_proj,
                     ip_scale=ip_scale, 
                 )
-                # 直接删除block，而不是to cpu
                 with torch.cuda.stream(offload_streams):
-                    block.to('meta')
-                    # torch.cuda.empty_cache()
+                    # block.to('meta')
+                    block.to('cpu', non_blocking=True)
             # controlnet residual
             if block_controlnet_hidden_states is not None:
                 img = img + block_controlnet_hidden_states[index_block % 2]
-            cur = time.time()
 
         double_blocks_done = time.time()
-        # del new_double_blocks
-        # torch.cuda.empty_cache()
 
         img = torch.cat((txt, img), 1)
         # 创建和single_blocks数量一样的stream
         load_streams = [torch.cuda.Stream() for _ in range(len(self.single_blocks))]
         # 创建新的single_blocks
-        new_single_blocks = nn.ModuleList()
+        new_single_blocks = [None for _ in range(len(self.single_blocks))]
         # 先加载1个single_block
-        with torch.cuda.stream(load_streams[0]):
-            # origin_block = self.single_blocks[0]
-            # origin_block.to(self.exec_device)
-            new_block = copy.deepcopy(origin_block).to(self.exec_device, non_blocking=True)
-            new_single_blocks.append(new_block)
+        load_block(self.single_blocks, new_single_blocks, load_streams, 0, do_copy=do_copy)
+
         next_to_cuda = 0
         sync_wait_cur = 0
         do_calc = 0
@@ -292,38 +325,20 @@ class Flux(nn.Module):
             else:
                 t1 = time.time()
                 # 使用stream加载下N个block
-                for i in range(1):
+                for i in range(pre_load_n):
                     next_index = index_block + 1 + i
-                    if next_index < len(self.single_blocks):
-                        with torch.cuda.stream(load_streams[next_index]):
-                            origin_block = self.single_blocks[next_index]
-                            t_sub1 = time.time()
-                            # new_block = SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=self.params.mlp_ratio
-                            #                               ).to(next(origin_block.parameters()).dtype)
-                            # new_block = torch.jit.script(origin_block) # 报错
-                            # for p1, p2 in zip(origin_block.parameters(), new_block.parameters()): # 一次接近1秒
-                            #     p2.data.copy_(p1.data)  # 直接复制数据，而不是创建新 Tensor
-                            # new_block.load_state_dict(origin_block.state_dict()) # 一次接近1秒
-                            new_block = copy.deepcopy(origin_block) # 一次0.01秒多
-                            t_sub2 = time.time()
-                            # 主要消耗在to cuda，一次0.04秒左右
-                            with torch.inference_mode():
-                                new_block = new_block.to(self.exec_device, non_blocking=True)
-                                new_single_blocks.append(new_block)
-                            t_sub3 = time.time()
-                            # print(f'move block, {t_sub2 - t_sub1}, {t_sub3 - t_sub2}')
-                            origin_block.to(self.exec_device)
+                    load_block(self.single_blocks, new_single_blocks, load_streams, next_index, do_copy=do_copy)
                 t2 = time.time()
                 # 等待自己的block加载完成
                 load_streams[index_block].synchronize()
                 t3 = time.time()
                 # 计算
-                # block = new_single_blocks[index_block]
-                t4 = time.time()
+                block = new_single_blocks[index_block]
                 img = block(img, vec=vec, pe=pe)
+                t4 = time.time()
                 with torch.cuda.stream(offload_streams):
-                    block.to('meta')
-                    # block.to('cpu')
+                    # block.to('meta')
+                    block.to('cpu', non_blocking=True)
                 t5 = time.time()
                 next_to_cuda += t2 - t1
                 sync_wait_cur += t3 - t2
@@ -331,11 +346,8 @@ class Flux(nn.Module):
                 do_offload += t5 - t4
         img = img[:, txt.shape[1] :, ...]
         single_blocks_done = time.time()
-        # del new_single_blocks
-        # torch.cuda.empty_cache()
 
-        final_layer = self.final_layer.to("cuda")
-        img = final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
+        img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         forward_end = time.time()
         print(f'flux forward total {forward_end-forward_start}, prepare {prepare_done-forward_start}, double {double_blocks_done-prepare_done}, single {single_blocks_done-double_blocks_done} ({next_to_cuda}/{sync_wait_cur}/{do_calc}/{do_offload}), final_layer {forward_end - single_blocks_done}')
         return img
