@@ -4,6 +4,7 @@ from typing import Callable
 import torch
 from einops import rearrange, repeat
 from torch import Tensor
+import time, copy
 
 from .model import Flux
 from .modules.conditioner import HFEmbedder
@@ -29,7 +30,8 @@ def get_noise(
     )
 
 
-def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[str]) -> dict[str, Tensor]:
+def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[str],
+            custom_offload: bool = False, device = None) -> dict[str, Tensor]:
     bs, c, h, w = img.shape
     if bs == 1 and not isinstance(prompt, str):
         bs = len(prompt)
@@ -45,15 +47,30 @@ def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[st
 
     if isinstance(prompt, str):
         prompt = [prompt]
+
+    if custom_offload and device is not None:
+        # custom_offload: 先在cpu上copy一份，然后转移至GPU，使用后直接del
+        t5 = copy.deepcopy(t5)
+        t5 = t5.to(device)
     txt = t5(prompt)
+    if custom_offload and device is not None:
+        del t5
+
     if txt.shape[0] == 1 and bs > 1:
         txt = repeat(txt, "1 ... -> bs ...", bs=bs)
     txt_ids = torch.zeros(bs, txt.shape[1], 3)
 
+    if custom_offload and device is not None:
+        clip = copy.deepcopy(clip)
+        clip = clip.to(device)
     vec = clip(prompt)
+    if custom_offload and device is not None:
+        del clip
+
     if vec.shape[0] == 1 and bs > 1:
         vec = repeat(vec, "1 ... -> bs ...", bs=bs)
 
+    # img = img.to('cuda') enable_sequential_cpu_offload需要这个
     return {
         "img": img,
         "img_ids": img_ids.to(img.device),
@@ -120,6 +137,7 @@ def denoise(
     # this is ignored for schnell
     guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
     for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+        start = time.time()
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
         pred = model(
             img=img,
@@ -132,6 +150,7 @@ def denoise(
             image_proj=image_proj,
             ip_scale=ip_scale, 
         )
+        middle = time.time()
         if i >= timestep_to_start_cfg:
             neg_pred = model(
                 img=img,
@@ -147,6 +166,8 @@ def denoise(
             pred = neg_pred + true_gs * (pred - neg_pred)
         img = img + (t_prev - t_curr) * pred
         i += 1
+        end = time.time()
+        print(f'denoise step {i} use {end-start}, prompt use {middle-start}, neg use {end-middle}')
     return img
 
 def denoise_controlnet(

@@ -281,7 +281,7 @@ def load_from_repo_id(repo_id, checkpoint_name):
     sd = load_sft(ckpt_path, device='cpu')
     return sd
 
-def load_flow_model(name: str, device: str | torch.device = "cuda", hf_download: bool = True):
+def load_flow_model(name: str, device: str | torch.device = "cuda", hf_download: bool = True, custom_offload: bool = False, exec_device = None):
     # Loading Flux
     print("Init model")
     ckpt_path = configs[name].ckpt_path
@@ -294,10 +294,10 @@ def load_flow_model(name: str, device: str | torch.device = "cuda", hf_download:
         ckpt_path = hf_hub_download(configs[name].repo_id, configs[name].repo_flow)
 
     with torch.device("meta" if ckpt_path is not None else device):
-        model = Flux(configs[name].params).to(torch.bfloat16)
+        model = Flux(configs[name].params, custom_offload=custom_offload, exec_device=exec_device).to(torch.bfloat16)
 
     if ckpt_path is not None:
-        print("Loading checkpoint")
+        print(f"Loading checkpoint, device: {device}, ckpt_path: {ckpt_path}")
         # load_sft doesn't support torch.device
         sd = load_sft(ckpt_path, device=str(device))
         missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
@@ -362,10 +362,16 @@ def load_controlnet(name, device, transformer=None):
 
 def load_t5(device: str | torch.device = "cuda", max_length: int = 512) -> HFEmbedder:
     # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
-    return HFEmbedder("xlabs-ai/xflux_text_encoders", max_length=max_length, torch_dtype=torch.bfloat16).to(device)
+    t5_path = os.getenv("T5")
+    if t5_path is None:
+        t5_path = "xlabs-ai/xflux_text_encoders"
+    return HFEmbedder(t5_path, max_length=max_length, torch_dtype=torch.bfloat16).to(device)
 
 def load_clip(device: str | torch.device = "cuda") -> HFEmbedder:
-    return HFEmbedder("openai/clip-vit-large-patch14", max_length=77, torch_dtype=torch.bfloat16).to(device)
+    clip_path = os.getenv("CLIP")
+    if clip_path is None:
+        clip_path = "openai/clip-vit-large-patch14"
+    return HFEmbedder(clip_path, max_length=77, torch_dtype=torch.bfloat16, is_clip=True).to(device)
 
 
 def load_ae(name: str, device: str | torch.device = "cuda", hf_download: bool = True) -> AutoEncoder:

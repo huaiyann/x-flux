@@ -2,10 +2,12 @@ from PIL import Image, ExifTags
 import numpy as np
 import torch
 from torch import Tensor
+from typing import Optional, Union, Dict, Any
 
 from einops import rearrange
 import uuid
 import os
+import inspect
 
 from src.flux.modules.layers import (
     SingleStreamBlockProcessor,
@@ -31,26 +33,39 @@ from src.flux.util import (
 from transformers import CLIPVisionModelWithProjection, CLIPImageProcessor
 
 class XFluxPipeline:
-    def __init__(self, model_type, device, offload: bool = False):
+    _optional_components = []
+
+    def __init__(self, model_type, device, offload: bool = False, custom_offload: bool = False):
         self.device = torch.device(device)
         self.offload = offload
+        self.custom_offload = custom_offload
         self.model_type = model_type
 
-        self.clip = load_clip(self.device)
-        self.t5 = load_t5(self.device, max_length=512)
-        self.ae = load_ae(model_type, device="cpu" if offload else self.device)
+        self.clip = load_clip(device="cpu" if custom_offload else self.device)
+        self.t5 = load_t5(device="cpu" if custom_offload else self.device, max_length=512)
+        self.ae = load_ae(model_type, device="cpu" if offload or custom_offload else self.device)
         if "fp8" in model_type:
-            self.model = load_flow_model_quintized(model_type, device="cpu" if offload else self.device)
+            self.model = load_flow_model_quintized(model_type, device="cpu" if offload or custom_offload else self.device)
         else:
-            self.model = load_flow_model(model_type, device="cpu" if offload else self.device)
+            self.model = load_flow_model(model_type, device="cpu" if offload or custom_offload else self.device, custom_offload=custom_offload)
 
-        self.image_encoder_path = "openai/clip-vit-large-patch14"
+        clip_path = os.getenv("CLIP")
+        if clip_path is None:
+            self.image_encoder_path = "openai/clip-vit-large-patch14"
+        else:
+            self.image_encoder_path = clip_path
         self.hf_lora_collection = "XLabs-AI/flux-lora-collection"
         self.lora_types_to_names = {
             "realism": "lora.safetensors",
         }
         self.controlnet_loaded = False
         self.ip_loaded = False
+        self.components = {
+            "model": self.model,
+            "clip": self.clip,
+            "t5": self.t5,
+            "ae": self.ae,
+        }
 
     def set_ip(self, local_path: str = None, repo_id = None, name: str = None):
         self.model.to(self.device)
@@ -290,12 +305,14 @@ class XFluxPipeline:
         with torch.no_grad():
             if self.offload:
                 self.t5, self.clip = self.t5.to(self.device), self.clip.to(self.device)
-            inp_cond = prepare(t5=self.t5, clip=self.clip, img=x, prompt=prompt)
-            neg_inp_cond = prepare(t5=self.t5, clip=self.clip, img=x, prompt=neg_prompt)
+            inp_cond = prepare(t5=self.t5, clip=self.clip, img=x, prompt=prompt, custom_offload=self.custom_offload, device=self.device)
+            neg_inp_cond = prepare(t5=self.t5, clip=self.clip, img=x, prompt=neg_prompt, custom_offload=self.custom_offload, device=self.device)
 
             if self.offload:
                 self.offload_model_to_cpu(self.t5, self.clip)
                 self.model = self.model.to(self.device)
+            if self.custom_offload:
+                self.offload_model_to_cpu(self.t5, self.clip)
             if self.controlnet_loaded:
                 x = denoise_controlnet(
                     self.model,
@@ -335,6 +352,8 @@ class XFluxPipeline:
             if self.offload:
                 self.offload_model_to_cpu(self.model)
                 self.ae.decoder.to(x.device)
+            if self.custom_offload:
+                self.ae.decoder.to(x.device)
             x = unpack(x.float(), height, width)
             x = self.ae.decode(x)
             self.offload_model_to_cpu(self.ae.decoder)
@@ -351,6 +370,83 @@ class XFluxPipeline:
             torch.cuda.empty_cache()
 
 
+    def enable_sequential_cpu_offload(self, gpu_id: Optional[int] = None, device: Union[torch.device, str] = "cuda"):
+        r"""
+        Offloads all models to CPU using 🤗 Accelerate, significantly reducing memory usage. When called, the state
+        dicts of all `torch.nn.Module` components (except those in `self._exclude_from_cpu_offload`) are saved to CPU
+        and then moved to `torch.device('meta')` and loaded to GPU only when their specific submodule has its `forward`
+        method called. Offloading happens on a submodule basis. Memory savings are higher than with
+        `enable_model_cpu_offload`, but performance is lower.
+
+        Arguments:
+            gpu_id (`int`, *optional*):
+                The ID of the accelerator that shall be used in inference. If not specified, it will default to 0.
+            device (`torch.Device` or `str`, *optional*, defaults to "cuda"):
+                The PyTorch device type of the accelerator that shall be used in inference. If not specified, it will
+                default to "cuda".
+        """
+        from accelerate import cpu_offload
+        # self.remove_all_hooks()
+
+        # is_pipeline_device_mapped = self.hf_device_map is not None and len(self.hf_device_map) > 1
+        # if is_pipeline_device_mapped:
+        #     raise ValueError(
+        #         "It seems like you have activated a device mapping strategy on the pipeline so calling `enable_sequential_cpu_offload() isn't allowed. You can call `reset_device_map()` first and then call `enable_sequential_cpu_offload()`."
+        #     )
+
+        torch_device = torch.device(device)
+        device_index = torch_device.index
+
+        if gpu_id is not None and device_index is not None:
+            raise ValueError(
+                f"You have passed both `gpu_id`={gpu_id} and an index as part of the passed device `device`={device}"
+                f"Cannot pass both. Please make sure to either not define `gpu_id` or not pass the index as part of the device: `device`={torch_device.type}"
+            )
+
+        # _offload_gpu_id should be set to passed gpu_id (or id in passed `device`) or default to previously set id or default to 0
+        self._offload_gpu_id = gpu_id or torch_device.index or getattr(self, "_offload_gpu_id", 0)
+
+        device_type = torch_device.type
+        device = torch.device(f"{device_type}:{self._offload_gpu_id}")
+        self._offload_device = device
+
+        if self.device.type != "cpu":
+            self.to("cpu", silence_dtype_warnings=True)
+            device_mod = getattr(torch, self.device.type, None)
+            if hasattr(device_mod, "empty_cache") and device_mod.is_available():
+                device_mod.empty_cache()  # otherwise we don't see the memory savings (but they probably exist)
+
+        # print(f'components: {self.components}')
+        for name, model in self.components.items():
+            if not isinstance(model, torch.nn.Module):
+                continue
+            print(f'offloading {name}')
+            if name == "model":
+                continue
+            # if name in self._exclude_from_cpu_offload:
+            #     model.to(device)
+            # else:
+            # make sure to offload buffers if not all high level weights
+            # are of type nn.Module
+            offload_buffers = len(model._parameters) > 0
+            pre_load = ["SingleStreamBlock", "DoubleStreamBlock"]
+            cpu_offload(model, device, offload_buffers=offload_buffers, preload_module_classes=pre_load)
+
+    @classmethod
+    def _get_signature_keys(cls, obj):
+        parameters = inspect.signature(obj.__init__).parameters
+        required_parameters = {k: v for k, v in parameters.items() if v.default == inspect._empty}
+        optional_parameters = set({k for k, v in parameters.items() if v.default != inspect._empty})
+        expected_modules = set(required_parameters.keys()) - {"self"}
+
+        optional_names = list(optional_parameters)
+        for name in optional_names:
+            if name in cls._optional_components:
+                expected_modules.add(name)
+                optional_parameters.remove(name)
+
+        return expected_modules, optional_parameters
+
 class XFluxSampler(XFluxPipeline):
     def __init__(self, clip, t5, ae, model, device):
         self.clip = clip
@@ -362,3 +458,4 @@ class XFluxSampler(XFluxPipeline):
         self.controlnet_loaded = False
         self.ip_loaded = False
         self.offload = False
+        self.custom_offload = False

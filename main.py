@@ -1,8 +1,9 @@
 import argparse
 from PIL import Image
-import os
+import os, time
 
 from src.flux.xflux_pipeline import XFluxPipeline
+from accelerate.hooks import add_hook_to_module, AlignDevicesHook, named_module_tensors, attach_align_device_hook_on_blocks
 
 
 def create_argparser():
@@ -131,6 +132,9 @@ def create_argparser():
     parser.add_argument(
         "--save_path", type=str, default='results', help="Path to save"
     )
+    parser.add_argument(
+        "--custom_offload", type=bool, default=False, help="custom offload"
+    )
     return parser
 
 
@@ -140,7 +144,7 @@ def main(args):
     else:
         image = None
 
-    xflux_pipeline = XFluxPipeline(args.model_type, args.device, args.offload)
+    xflux_pipeline = XFluxPipeline(args.model_type, args.device, args.offload, args.custom_offload)
     if args.use_ip:
         print('load ip-adapter:', args.ip_local_path, args.ip_repo_id, args.ip_name)
         xflux_pipeline.set_ip(args.ip_local_path, args.ip_repo_id, args.ip_name)
@@ -154,7 +158,10 @@ def main(args):
     image_prompt = Image.open(args.img_prompt) if args.img_prompt else None
     neg_image_prompt = Image.open(args.neg_img_prompt) if args.neg_img_prompt else None
 
-    for _ in range(args.num_images_per_prompt):
+    xflux_pipeline.enable_sequential_cpu_offload()
+
+    for i in range(args.num_images_per_prompt):
+        start = time.time()
         result = xflux_pipeline(
             prompt=args.prompt,
             controlnet_image=image,
@@ -171,12 +178,14 @@ def main(args):
             neg_image_prompt=neg_image_prompt,
             ip_scale=args.ip_scale,
             neg_ip_scale=args.neg_ip_scale,
+
         )
         if not os.path.exists(args.save_path):
             os.mkdir(args.save_path)
         ind = len(os.listdir(args.save_path))
         result.save(os.path.join(args.save_path, f"result_{ind}.png"))
         args.seed = args.seed + 1
+        print(f'img {i} use {time.time() - start}')
 
 
 if __name__ == "__main__":
