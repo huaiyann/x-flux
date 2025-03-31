@@ -70,7 +70,6 @@ def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[st
     if vec.shape[0] == 1 and bs > 1:
         vec = repeat(vec, "1 ... -> bs ...", bs=bs)
 
-    # img = img.to('cuda') enable_sequential_cpu_offload需要这个
     return {
         "img": img,
         "img_ids": img_ids.to(img.device),

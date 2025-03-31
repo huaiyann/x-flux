@@ -158,7 +158,7 @@ def main(args):
     image_prompt = Image.open(args.img_prompt) if args.img_prompt else None
     neg_image_prompt = Image.open(args.neg_img_prompt) if args.neg_img_prompt else None
 
-    xflux_pipeline.enable_sequential_cpu_offload()
+    # xflux_pipeline.enable_sequential_cpu_offload()
 
     for i in range(args.num_images_per_prompt):
         start = time.time()

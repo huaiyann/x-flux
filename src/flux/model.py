@@ -32,7 +32,7 @@ class Flux(nn.Module):
     """
     _supports_gradient_checkpointing = True
 
-    def __init__(self, params: FluxParams, custom_offload: bool = False, exec_device = 'cuda'):
+    def __init__(self, params: FluxParams, custom_offload: bool = False, exec_device = None):
         super().__init__()
 
         self.params = params
@@ -185,21 +185,12 @@ class Flux(nn.Module):
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
 
-        # img.to("cuda")
-        # txt.to("cuda")
-        # vec.to("cuda")
-        # if pe is not None:
-        #     pe.to("cuda")
-        # if image_proj is not None:
-        #     image_proj.to("cuda")
-        # if ip_scale is not None and isinstance(ip_scale, Tensor):
-        #     ip_scale.to("cuda")
-
         if block_controlnet_hidden_states is not None:
             controlnet_depth = len(block_controlnet_hidden_states)
 
         prepare_done = time.time()
 
+        offload_streams = torch.cuda.Stream()
         # 创建和double_blocks数量一样的stream
         load_streams = [torch.cuda.Stream() for _ in range(len(self.double_blocks))]
         # 创建新的double_blocks
@@ -237,8 +228,9 @@ class Flux(nn.Module):
                     next_index = index_block + 1 + i
                     if next_index < len(self.double_blocks):
                         with torch.cuda.stream(load_streams[next_index]):
-                            block = self.double_blocks[next_index].to("cuda", non_blocking=True)
-                            new_double_blocks.append(block)
+                            origin_block = self.double_blocks[next_index]
+                            new_block = copy.deepcopy(origin_block).to(self.exec_device, non_blocking=True)
+                            new_double_blocks.append(new_block)
                 # 等待自己的block加载完成
                 load_streams[index_block].synchronize()
                 # 计算
@@ -252,16 +244,17 @@ class Flux(nn.Module):
                     ip_scale=ip_scale, 
                 )
                 # 直接删除block，而不是to cpu
-                del block
-                torch.cuda.empty_cache()
+                with torch.cuda.stream(offload_streams):
+                    block.to('meta')
+                    # torch.cuda.empty_cache()
             # controlnet residual
             if block_controlnet_hidden_states is not None:
                 img = img + block_controlnet_hidden_states[index_block % 2]
             cur = time.time()
 
         double_blocks_done = time.time()
-        del new_double_blocks
-        torch.cuda.empty_cache()
+        # del new_double_blocks
+        # torch.cuda.empty_cache()
 
         img = torch.cat((txt, img), 1)
         # 创建和single_blocks数量一样的stream
@@ -269,15 +262,16 @@ class Flux(nn.Module):
         # 创建新的single_blocks
         new_single_blocks = nn.ModuleList()
         # 先加载1个single_block
-        t1 = time.time()
         with torch.cuda.stream(load_streams[0]):
-            block = self.single_blocks[0].to("cuda", non_blocking=True)
-            new_single_blocks.append(block)
-        # print(f'load 1 single block, use {time.time()-t1}, total {len(self.single_blocks)} single blocks')
-        last_t = time.time()
+            # origin_block = self.single_blocks[0]
+            # origin_block.to(self.exec_device)
+            new_block = copy.deepcopy(origin_block).to(self.exec_device, non_blocking=True)
+            new_single_blocks.append(new_block)
+        next_to_cuda = 0
+        sync_wait_cur = 0
+        do_calc = 0
+        do_offload = 0
         for index_block, block in enumerate(self.single_blocks):
-            param_size, buffer_size, total_size = self.estimate_model_size(block)
-            # print(f'single block, size: {param_size/1024/1024}MB, {buffer_size/1024/1024}MB, {total_size/1024/1024}MB')
             if self.training and self.gradient_checkpointing:
                 def create_custom_forward(module, return_dict=None):
                     def custom_forward(*inputs):
@@ -297,46 +291,51 @@ class Flux(nn.Module):
                 )
             else:
                 t1 = time.time()
-                # 使用stream加载下一个block
+                # 使用stream加载下N个block
                 for i in range(1):
                     next_index = index_block + 1 + i
                     if next_index < len(self.single_blocks):
                         with torch.cuda.stream(load_streams[next_index]):
-                            block = self.single_blocks[next_index].to("cuda", non_blocking=True)
-                            new_single_blocks.append(block)
+                            origin_block = self.single_blocks[next_index]
+                            t_sub1 = time.time()
+                            # new_block = SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=self.params.mlp_ratio
+                            #                               ).to(next(origin_block.parameters()).dtype)
+                            # new_block = torch.jit.script(origin_block) # 报错
+                            # for p1, p2 in zip(origin_block.parameters(), new_block.parameters()): # 一次接近1秒
+                            #     p2.data.copy_(p1.data)  # 直接复制数据，而不是创建新 Tensor
+                            # new_block.load_state_dict(origin_block.state_dict()) # 一次接近1秒
+                            new_block = copy.deepcopy(origin_block) # 一次0.01秒多
+                            t_sub2 = time.time()
+                            # 主要消耗在to cuda，一次0.04秒左右
+                            with torch.inference_mode():
+                                new_block = new_block.to(self.exec_device, non_blocking=True)
+                                new_single_blocks.append(new_block)
+                            t_sub3 = time.time()
+                            # print(f'move block, {t_sub2 - t_sub1}, {t_sub3 - t_sub2}')
+                            origin_block.to(self.exec_device)
                 t2 = time.time()
                 # 等待自己的block加载完成
                 load_streams[index_block].synchronize()
-
-                # # 加载自己的block
-                # block.to("cuda")
                 t3 = time.time()
-                block = new_single_blocks[index_block]
-                img = block(img, vec=vec, pe=pe)
+                # 计算
+                # block = new_single_blocks[index_block]
                 t4 = time.time()
-                # with torch.cuda.stream(to_cpu_stream):
-                    # block.to("cpu", non_blocking=True)
-                del block
-                torch.cuda.empty_cache()
+                img = block(img, vec=vec, pe=pe)
+                with torch.cuda.stream(offload_streams):
+                    block.to('meta')
+                    # block.to('cpu')
                 t5 = time.time()
-
-            cur = time.time()
-            # print(f'single block index: {index_block}, use {cur-last_t}, next to cuda {t2-t1}, sync wait cur{t3-t2}, calc {t4-t3}, to cpu {t5-t4}')
-            last_t = cur
-        # print(f'end single block')
+                next_to_cuda += t2 - t1
+                sync_wait_cur += t3 - t2
+                do_calc += t4 - t3
+                do_offload += t5 - t4
         img = img[:, txt.shape[1] :, ...]
         single_blocks_done = time.time()
-        del new_single_blocks
-        torch.cuda.empty_cache()
+        # del new_single_blocks
+        # torch.cuda.empty_cache()
 
-        # print(f'start final layer')
-        t1 = time.time()
         final_layer = self.final_layer.to("cuda")
-        t2 = time.time()
-        # print(f'final layer to cuda, use {t2-t1}')
         img = final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
-        t3 = time.time()
-        # print(f'final layer calc, use {t3-t2}')
         forward_end = time.time()
-        print(f'flux forward total {forward_end-forward_start}, prepare {prepare_done-forward_start}, double {double_blocks_done-prepare_done}, single {single_blocks_done-double_blocks_done}, final_layer {forward_end - single_blocks_done}')
+        print(f'flux forward total {forward_end-forward_start}, prepare {prepare_done-forward_start}, double {double_blocks_done-prepare_done}, single {single_blocks_done-double_blocks_done} ({next_to_cuda}/{sync_wait_cur}/{do_calc}/{do_offload}), final_layer {forward_end - single_blocks_done}')
         return img

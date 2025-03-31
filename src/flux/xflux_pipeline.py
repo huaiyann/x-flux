@@ -47,7 +47,8 @@ class XFluxPipeline:
         if "fp8" in model_type:
             self.model = load_flow_model_quintized(model_type, device="cpu" if offload or custom_offload else self.device)
         else:
-            self.model = load_flow_model(model_type, device="cpu" if offload or custom_offload else self.device, custom_offload=custom_offload)
+            self.model = load_flow_model(model_type, device="cpu" if offload or custom_offload else self.device,
+                                         custom_offload=custom_offload, exec_device=device)
 
         clip_path = os.getenv("CLIP")
         if clip_path is None:
@@ -296,6 +297,7 @@ class XFluxPipeline:
             1, height, width, device=self.device,
             dtype=torch.bfloat16, seed=seed
         )
+
         timesteps = get_schedule(
             num_steps,
             (width // 8) * (height // 8) // (16 * 16),
