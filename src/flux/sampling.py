@@ -32,6 +32,7 @@ def get_noise(
 
 def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[str],
             custom_offload: bool = False, device = None) -> dict[str, Tensor]:
+    start = time.time()
     bs, c, h, w = img.shape
     if bs == 1 and not isinstance(prompt, str):
         bs = len(prompt)
@@ -48,38 +49,15 @@ def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[st
     if isinstance(prompt, str):
         prompt = [prompt]
 
-    t1 = time.time()
-    if custom_offload and device is not None:
-        # custom_offload: 先在cpu上copy一份，然后转移至GPU，使用后直接del
-        t5 = copy.deepcopy(t5)
-        t5 = t5.to(device)
-    t2 = time.time()
     txt = t5(prompt)
-    t3 = time.time()
-    if custom_offload and device is not None:
-        del t5
-    t4 = time.time()
-    print(f'prepare t5 load {t2-t1}, calc {t3-t2}, offload {t4-t3}')
-
     if txt.shape[0] == 1 and bs > 1:
         txt = repeat(txt, "1 ... -> bs ...", bs=bs)
     txt_ids = torch.zeros(bs, txt.shape[1], 3)
-
-    t1 = time.time()
-    if custom_offload and device is not None:
-        clip = copy.deepcopy(clip)
-        clip = clip.to(device)
-    t2 = time.time()
+    
     vec = clip(prompt)
-    t3 = time.time()
-    if custom_offload and device is not None:
-        del clip
-    t4 = time.time()
-    print(f'prepare clip load {t2-t1}, calc {t3-t2}, offload {t4-t3}')
-
     if vec.shape[0] == 1 and bs > 1:
         vec = repeat(vec, "1 ... -> bs ...", bs=bs)
-
+    print(f'prepare use {time.time()-start}')
     return {
         "img": img,
         "img_ids": img_ids.to(img.device),

@@ -375,6 +375,7 @@ class DoubleStreamBlock(nn.Module):
     def get_processor(self):
         return self.processor
 
+    @torch.compile
     def forward(
         self,
         img: Tensor,
@@ -544,6 +545,7 @@ class SingleStreamBlock(nn.Module):
     def get_processor(self):
         return self.processor
 
+    @torch.compile
     def forward(
         self,
         x: Tensor,

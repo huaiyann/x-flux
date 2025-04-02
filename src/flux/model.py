@@ -204,7 +204,6 @@ class Flux(nn.Module):
         #     record_shapes=True,
         #     with_stack=True
         # ) as prof:
-
         for index_block, block in enumerate(self.double_blocks):
             if self.training and self.gradient_checkpointing:
                 def create_custom_forward(module, return_dict=None):
@@ -248,7 +247,6 @@ class Flux(nn.Module):
         vec = vec.to(device2)
         txt = txt.to(device2)
         pe = pe.to(device2)
-
         for index_block, block in enumerate(self.single_blocks):
             if self.training and self.gradient_checkpointing:
                 def create_custom_forward(module, return_dict=None):
