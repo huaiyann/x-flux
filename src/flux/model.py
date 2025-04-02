@@ -247,7 +247,7 @@ class Flux(nn.Module):
                     next_index = index_block + 1 + i
                     load_block(self.double_blocks, new_double_blocks, load_streams, next_index, do_copy=do_copy)
                 # 等待自己的block加载完成
-                # load_streams[index_block].synchronize()
+                load_streams[index_block].synchronize()
                 # 计算
                 block = new_double_blocks[index_block]
                 img, txt = block(
@@ -265,7 +265,7 @@ class Flux(nn.Module):
             if block_controlnet_hidden_states is not None:
                 img = img + block_controlnet_hidden_states[index_block % 2]
         # print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
-        # torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
         double_blocks_done = time.time()
 
         img = torch.cat((txt, img), 1)
@@ -307,7 +307,7 @@ class Flux(nn.Module):
                     load_block(self.single_blocks, new_single_blocks, load_streams, next_index, do_copy=do_copy)
                 t2 = time.time()
                 # 等待自己的block加载完成
-                # load_streams[index_block].synchronize()
+                load_streams[index_block].synchronize()
                 t3 = time.time()
                 # 计算
                 block = new_single_blocks[index_block]
@@ -322,7 +322,7 @@ class Flux(nn.Module):
                 do_calc += t4 - t3
                 do_offload += t5 - t4
         img = img[:, txt.shape[1] :, ...]
-        # torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
         single_blocks_done = time.time()
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
