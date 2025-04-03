@@ -80,6 +80,7 @@ class Flux(nn.Module):
 
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
         self.gradient_checkpointing = False
+        self.param_dict = dict()
 
     def estimate_model_size(self, model: torch.nn.Module, dtype=torch.float32):
         param_size = sum(p.numel() for p in model.parameters() if p.requires_grad) * dtype.itemsize
@@ -172,6 +173,15 @@ class Flux(nn.Module):
                 if name in ['single_blocks', 'double_blocks']:
                     continue
                 model.to(self.exec_device)
+        # 将blocks明确为pin_memory
+        for _, block in enumerate(self.double_blocks):
+            for p in block.parameters():
+                p.data = p.data.cpu().pin_memory()
+                self.param_dict[p] = p.data
+        for _, block in enumerate(self.single_blocks):
+            for p in block.parameters():
+                p.data = p.data.cpu().pin_memory()
+                self.param_dict[p] = p.data
 
         # running on sequences img
         img = self.img_in(img)
@@ -258,9 +268,11 @@ class Flux(nn.Module):
                     image_proj=image_proj,
                     ip_scale=ip_scale, 
                 )
-                with torch.cuda.stream(offload_streams):
-                    # block.to('meta')
-                    block.to('cpu', non_blocking=True)
+                for p in block.parameters():
+                    p.data = self.param_dict[p]
+                # with torch.cuda.stream(offload_streams):
+                #     block.to('meta')
+                    # block.to('cpu', non_blocking=True)
             # controlnet residual
             if block_controlnet_hidden_states is not None:
                 img = img + block_controlnet_hidden_states[index_block % 2]
@@ -313,9 +325,11 @@ class Flux(nn.Module):
                 block = new_single_blocks[index_block]
                 img = block(img, vec=vec, pe=pe)
                 t4 = time.time()
-                with torch.cuda.stream(offload_streams):
+                for p in block.parameters():
+                    p.data = self.param_dict[p]
+                # with torch.cuda.stream(offload_streams):
                     # block.to('meta')
-                    block.to('cpu', non_blocking=True)
+                    # block.to('cpu', non_blocking=True)
                 t5 = time.time()
                 next_to_cuda += t2 - t1
                 sync_wait_cur += t3 - t2
