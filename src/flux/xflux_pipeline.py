@@ -41,8 +41,8 @@ class XFluxPipeline:
         self.custom_offload = custom_offload
         self.model_type = model_type
 
-        self.clip = load_clip(device="cpu" if custom_offload else self.device)
-        self.t5 = load_t5(device="cpu" if custom_offload else self.device, max_length=512)
+        self.clip = load_clip(self.device)
+        self.t5 = load_t5(self.device, max_length=512)
         self.ae = load_ae(model_type, device="cpu" if offload or custom_offload else self.device)
         if "fp8" in model_type:
             self.model = load_flow_model_quintized(model_type, device="cpu" if offload or custom_offload else self.device)
@@ -313,8 +313,8 @@ class XFluxPipeline:
             if self.offload:
                 self.offload_model_to_cpu(self.t5, self.clip)
                 self.model = self.model.to(self.device)
-            if self.custom_offload:
-                self.offload_model_to_cpu(self.t5, self.clip)
+            # if self.custom_offload:
+            #     self.offload_model_to_cpu(self.t5, self.clip)
             if self.controlnet_loaded:
                 x = denoise_controlnet(
                     self.model,

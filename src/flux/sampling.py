@@ -49,15 +49,15 @@ def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[st
         prompt = [prompt]
 
     t1 = time.time()
-    if custom_offload and device is not None:
-        # custom_offload: 先在cpu上copy一份，然后转移至GPU，使用后直接del
-        t5 = copy.deepcopy(t5)
-        t5 = t5.to(device)
+    # if custom_offload and device is not None:
+    #     # custom_offload: 先在cpu上copy一份，然后转移至GPU，使用后直接del
+    #     t5 = copy.deepcopy(t5)
+    #     t5 = t5.to(device)
     t2 = time.time()
     txt = t5(prompt)
     t3 = time.time()
-    if custom_offload and device is not None:
-        del t5
+    # if custom_offload and device is not None:
+    #     del t5
     t4 = time.time()
     print(f'prepare t5 load {t2-t1}, calc {t3-t2}, offload {t4-t3}')
 
@@ -66,14 +66,14 @@ def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[st
     txt_ids = torch.zeros(bs, txt.shape[1], 3)
 
     t1 = time.time()
-    if custom_offload and device is not None:
-        clip = copy.deepcopy(clip)
-        clip = clip.to(device)
+    # if custom_offload and device is not None:
+    #     clip = copy.deepcopy(clip)
+    #     clip = clip.to(device)
     t2 = time.time()
     vec = clip(prompt)
     t3 = time.time()
-    if custom_offload and device is not None:
-        del clip
+    # if custom_offload and device is not None:
+    #     del clip
     t4 = time.time()
     print(f'prepare clip load {t2-t1}, calc {t3-t2}, offload {t4-t3}')
 

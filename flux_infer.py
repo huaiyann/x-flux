@@ -39,7 +39,6 @@ class ModelOffloaderV2:
 
         @torch.compiler.disable()
         def post_hook(module, args, output):
-            print('post_hook')
             if not record_stream:
                 torch.cuda.current_stream().synchronize()
             for p in module.parameters():
@@ -75,7 +74,8 @@ class ModelOffloaderV2:
 
 
 pipe = FluxPipeline.from_pretrained("/home/ubuntu/models/flux.1-dev", torch_dtype=torch.bfloat16)
-ModelOffloaderV2(pipe.text_encoder_2, record_stream=True).cuda()  # T5
+pipe.text_encoder_2.cuda() # T5
+# ModelOffloaderV2(pipe.text_encoder_2, record_stream=True).cuda()  # T5
 ModelOffloaderV2(pipe.transformer, record_stream=True).cuda()
 pipe.text_encoder.cuda()  # CLIP
 pipe.vae.cuda()
@@ -84,15 +84,16 @@ pipe.vae.cuda()
 # torch._dynamo.config.cache_size_limit = 10000
 # pipe.transformer.compile()
 
-prompt = "A cat holding a sign that says hello world"
-start = time.time()
-image = pipe(
-    prompt,
-    height=256,
-    width=256,
-    guidance_scale=3.5,
-    num_inference_steps=30,
-    max_sequence_length=512,
-    generator=torch.Generator("cpu").manual_seed(0)
-).images[0]
-print(f'use {time.time() - start}')
+for i in range(2):
+    prompt = "A cat holding a sign that says hello world"
+    start = time.time()
+    image = pipe(
+        prompt,
+        height=256,
+        width=256,
+        guidance_scale=3.5,
+        num_inference_steps=30,
+        max_sequence_length=512,
+        generator=torch.Generator("cpu").manual_seed(0)
+    ).images[0]
+    print(f'use {time.time() - start}')

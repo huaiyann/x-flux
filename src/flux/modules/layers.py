@@ -336,6 +336,7 @@ class DoubleStreamBlockProcessor:
         txt = txt + txt_mod2.gate * attn.txt_mlp((1 + txt_mod2.scale) * attn.txt_norm2(txt) + txt_mod2.shift)
         return img, txt
 
+@torch.compile
 class DoubleStreamBlock(nn.Module):
     def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False, index: int = -1):
         super().__init__()
@@ -501,6 +502,7 @@ class SingleStreamBlockProcessor:
         output = x + mod.gate * output
         return output
 
+@torch.compile
 class SingleStreamBlock(nn.Module):
     """
     A DiT block with parallel linear layers as described in

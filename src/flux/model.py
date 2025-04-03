@@ -81,6 +81,7 @@ class Flux(nn.Module):
         self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
         self.gradient_checkpointing = False
         self.param_dict = dict()
+        self.first = True
 
     def estimate_model_size(self, model: torch.nn.Module, dtype=torch.float32):
         param_size = sum(p.numel() for p in model.parameters() if p.requires_grad) * dtype.itemsize
@@ -167,22 +168,30 @@ class Flux(nn.Module):
 
         forward_start = time.time()
 
-        # 将blocks以外的module、参数等都转移到GPU
-        if self.custom_offload:
-            for name, model in self.named_children():
-                if name in ['single_blocks', 'double_blocks']:
+        if self.first:
+            # 将blocks以外的module、参数等都转移到GPU
+            if self.custom_offload:
+                for name, model in self.named_children():
+                    if name in ['single_blocks', 'double_blocks']:
+                        continue
+                    model.to(self.exec_device)
+            # 将blocks[0]放cuda，其他放cpu并明确为pin_memory
+            for idx, block in enumerate(self.double_blocks):
+                if idx == 0:
+                    block.to(self.exec_device)
                     continue
-                model.to(self.exec_device)
-        # 将blocks明确为pin_memory
-        for _, block in enumerate(self.double_blocks):
-            for p in block.parameters():
-                p.data = p.data.cpu().pin_memory()
-                self.param_dict[p] = p.data
-        for _, block in enumerate(self.single_blocks):
-            for p in block.parameters():
-                p.data = p.data.cpu().pin_memory()
-                self.param_dict[p] = p.data
-
+                for  p in block.parameters():
+                    p.data = p.data.cpu().pin_memory()
+                    self.param_dict[p] = p.data
+            for idx, block in enumerate(self.single_blocks):
+                if idx == 0:
+                    block.to(self.exec_device)
+                    continue
+                for p in block.parameters():
+                    p.data = p.data.cpu().pin_memory()
+                    self.param_dict[p] = p.data
+            self.first = False
+    
         # running on sequences img
         img = self.img_in(img)
         vec = self.time_in(timestep_embedding(timesteps, 256))
@@ -201,36 +210,30 @@ class Flux(nn.Module):
 
         prepare_done = time.time()
 
-        offload_streams = torch.cuda.Stream()
-        # 创建和double_blocks数量一样的stream
-        load_streams = [torch.cuda.Stream() for _ in range(len(self.double_blocks))]
-        # 创建新的double_blocks
-        new_double_blocks = [None for _ in range(len(self.double_blocks))]
+        load_stream = torch.cuda.Stream()
 
 
-        def load_block(origin_blocks, new_blocks, load_streams, index, do_copy=False):
+        def load_block(origin_blocks, index, cur_stream):
             if index >= len(origin_blocks):
                 return
-            with torch.cuda.stream(load_streams[index]):
-                if not do_copy:
-                    new_block = origin_blocks[index].to(self.exec_device, non_blocking=True)
-                else:
-                    origin_block = origin_blocks[index]
-                    new_block = copy.deepcopy(origin_block).to(self.exec_device, non_blocking=True)
-                new_blocks[index] = new_block
-
-        do_copy = False
-        pre_load_n = 1
+            with torch.cuda.stream(load_stream):
+                block = origin_blocks[index]
+                # block = block.to(self.exec_device, non_blocking=True) # 注意这种方式比下面的慢，猜测是没利用上pin_memory
+                for p in block.parameters():
+                    p.data = p.data.to(self.exec_device, non_blocking=True)
+                    # p.data.record_stream(cur_stream) # 说是防止显存错误地提前释放？
 
         # with torch.profiler.profile(
         #     activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
         #     record_shapes=True,
         #     with_stack=True
         # ) as prof:
-        # 先加载n个double_block
-        for i in range(pre_load_n):
-            load_block(self.double_blocks, new_double_blocks, load_streams, i, do_copy=do_copy)
+        double_next_to_cuda = 0
+        double_sync_wait_cur = 0
+        double_do_calc = 0
+        double_do_offload = 0
         for index_block, block in enumerate(self.double_blocks):
+            t1 = time.time()
             if self.training and self.gradient_checkpointing:
                 def create_custom_forward(module, return_dict=None):
                     def custom_forward(*inputs):
@@ -252,14 +255,13 @@ class Flux(nn.Module):
                     ip_scale,
                 )
             else:
-                # 使用stream加载下N个block
-                for i in range(pre_load_n):
-                    next_index = index_block + 1 + i
-                    load_block(self.double_blocks, new_double_blocks, load_streams, next_index, do_copy=do_copy)
                 # 等待自己的block加载完成
-                load_streams[index_block].synchronize()
-                # 计算
-                block = new_double_blocks[index_block]
+                load_stream.synchronize()
+                t2 = time.time()
+                # 使用stream加载下N个block
+                current_stream = torch.cuda.current_stream()
+                load_block(self.double_blocks, index_block + 1, cur_stream=current_stream)
+                t3 = time.time()
                 img, txt = block(
                     img=img, 
                     txt=txt, 
@@ -268,26 +270,24 @@ class Flux(nn.Module):
                     image_proj=image_proj,
                     ip_scale=ip_scale, 
                 )
-                for p in block.parameters():
-                    p.data = self.param_dict[p]
-                # with torch.cuda.stream(offload_streams):
-                #     block.to('meta')
-                    # block.to('cpu', non_blocking=True)
+                t4 = time.time()
+                if index_block > 0:
+                    for p in block.parameters():
+                        # p.data.to('meta')
+                        p.data = self.param_dict[p]
+                t5 = time.time()
+                double_next_to_cuda += t3 - t2
+                double_sync_wait_cur += t2 - t1
+                double_do_calc += t4 - t3
+                double_do_offload += t5 - t4
+                # print(f'{double_next_to_cuda, double_sync_wait_cur, double_do_calc, double_do_offload}')
             # controlnet residual
             if block_controlnet_hidden_states is not None:
                 img = img + block_controlnet_hidden_states[index_block % 2]
         # print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
-        torch.cuda.empty_cache()
         double_blocks_done = time.time()
 
         img = torch.cat((txt, img), 1)
-        # 创建和single_blocks数量一样的stream
-        load_streams = [torch.cuda.Stream() for _ in range(len(self.single_blocks))]
-        # 创建新的single_blocks
-        new_single_blocks = [None for _ in range(len(self.single_blocks))]
-        # 先加载1个single_block
-        for i in range(pre_load_n):
-            load_block(self.single_blocks, new_single_blocks, load_streams, i, do_copy=do_copy)
 
         next_to_cuda = 0
         sync_wait_cur = 0
@@ -313,33 +313,38 @@ class Flux(nn.Module):
                 )
             else:
                 t1 = time.time()
-                # 使用stream加载下N个block
-                for i in range(pre_load_n):
-                    next_index = index_block + 1 + i
-                    load_block(self.single_blocks, new_single_blocks, load_streams, next_index, do_copy=do_copy)
-                t2 = time.time()
                 # 等待自己的block加载完成
-                load_streams[index_block].synchronize()
+                load_stream.synchronize()
+                t2 = time.time()
+                current_stream = torch.cuda.current_stream()
+                # 使用stream加载下N个block
+                load_block(self.single_blocks, index_block+1, cur_stream=current_stream)
                 t3 = time.time()
                 # 计算
-                block = new_single_blocks[index_block]
                 img = block(img, vec=vec, pe=pe)
                 t4 = time.time()
-                for p in block.parameters():
-                    p.data = self.param_dict[p]
-                # with torch.cuda.stream(offload_streams):
-                    # block.to('meta')
-                    # block.to('cpu', non_blocking=True)
+                if index_block > 0:
+                    for p in block.parameters():
+                        p.data = self.param_dict[p]
                 t5 = time.time()
-                next_to_cuda += t2 - t1
-                sync_wait_cur += t3 - t2
+                next_to_cuda += t3 - t2
+                sync_wait_cur += t2 - t1
                 do_calc += t4 - t3
                 do_offload += t5 - t4
         img = img[:, txt.shape[1] :, ...]
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         single_blocks_done = time.time()
 
         img = self.final_layer(img, vec)  # (N, T, patch_size ** 2 * out_channels)
         forward_end = time.time()
-        print(f'flux forward total {forward_end-forward_start}, prepare {prepare_done-forward_start}, double {double_blocks_done-prepare_done}, single {single_blocks_done-double_blocks_done} ({next_to_cuda}/{sync_wait_cur}/{do_calc}/{do_offload}), final_layer {forward_end - single_blocks_done}')
+        print(f'flux forward total {forward_end-forward_start}, prepare {prepare_done-forward_start}, \
+double {double_blocks_done-prepare_done} ({double_next_to_cuda}/{double_sync_wait_cur}/{double_do_calc}/{double_do_offload}), \
+single {single_blocks_done-double_blocks_done} ({next_to_cuda}/{sync_wait_cur}/{do_calc}/{do_offload}), \
+final_layer {forward_end - single_blocks_done}')
         return img
+
+# 1. 对data使用pin memory，并在to cuda时对data单独执行，减少to cuda时间
+# 2. 保存cpu data的指针，to cpu时只是复制回这个指针，不是真的to cpu
+# 3. 第0个放gpu上
+# 4. 不empty cache，但是要解决显存释放问题，否则基本每两轮会显存满，触发显存清理导致变慢
+# 5. 针对4的解决方案是什么？使用1个load stream而不是多个后有所缓解，之前是两次迭代触发一次，现在是10次迭代左右触发一次。生图时间40->32秒
