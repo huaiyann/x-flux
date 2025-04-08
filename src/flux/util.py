@@ -12,6 +12,7 @@ from safetensors.torch import load_file as load_sft
 
 from optimum.quanto import requantize
 
+from .offload import ModelOffloader
 from .model import Flux, FluxParams
 from .controlnet import ControlNetFlux
 from .modules.autoencoder import AutoEncoder, AutoEncoderParams
@@ -365,7 +366,11 @@ def load_t5(device: str | torch.device = "cuda", max_length: int = 512) -> HFEmb
     t5_path = os.getenv("T5")
     if t5_path is None:
         t5_path = "xlabs-ai/xflux_text_encoders"
+    # model =  HFEmbedder(t5_path, max_length=max_length, torch_dtype=torch.bfloat16)
+    # ModelOffloader(model, device).load()
+    # return model
     return HFEmbedder(t5_path, max_length=max_length, torch_dtype=torch.bfloat16).to(device)
+
 
 def load_clip(device: str | torch.device = "cuda") -> HFEmbedder:
     clip_path = os.getenv("CLIP")
