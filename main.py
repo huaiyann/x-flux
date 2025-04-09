@@ -3,8 +3,6 @@ from PIL import Image
 import os, time
 
 from src.flux.xflux_pipeline import XFluxPipeline
-from accelerate.hooks import add_hook_to_module, AlignDevicesHook, named_module_tensors, attach_align_device_hook_on_blocks
-
 
 def create_argparser():
     parser = argparse.ArgumentParser()
@@ -157,8 +155,6 @@ def main(args):
 
     image_prompt = Image.open(args.img_prompt) if args.img_prompt else None
     neg_image_prompt = Image.open(args.neg_img_prompt) if args.neg_img_prompt else None
-
-    # xflux_pipeline.enable_sequential_cpu_offload()
 
     for i in range(args.num_images_per_prompt):
         start = time.time()
