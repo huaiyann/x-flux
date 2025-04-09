@@ -336,6 +336,13 @@ class DoubleStreamBlockProcessor:
         txt = txt + txt_mod2.gate * attn.txt_mlp((1 + txt_mod2.scale) * attn.txt_norm2(txt) + txt_mod2.shift)
         return img, txt
 
+# def fix_model_nans(model):
+#     for name, module in model.named_modules():
+#         if isinstance(module, nn.Linear):
+#             if torch.isnan(module.weight).any():
+#                 print(f"Resetting weights in {name}")
+#                 module.reset_parameters()
+
 class DoubleStreamBlock(nn.Module):
     def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, qkv_bias: bool = False, index: int = -1):
         super().__init__()
@@ -375,7 +382,7 @@ class DoubleStreamBlock(nn.Module):
     def get_processor(self):
         return self.processor
 
-    @torch.compile
+    # @torch.compile
     def forward(
         self,
         img: Tensor,
@@ -545,7 +552,7 @@ class SingleStreamBlock(nn.Module):
     def get_processor(self):
         return self.processor
 
-    @torch.compile
+    # @torch.compile
     def forward(
         self,
         x: Tensor,

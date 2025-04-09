@@ -122,6 +122,8 @@ def denoise(
 ):
     i = 0
     # this is ignored for schnell
+    denoise_start = time.time()
+    # print(f'denoise start, img {img}')
     guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
     for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
         start = time.time()
@@ -161,6 +163,7 @@ def denoise(
         i += 1
         end = time.time()
         print(f'denoise step {i} use {end-start}, prompt use {middle-start}, neg use {end-middle}')
+    print(f'denoise total use {time.time() - denoise_start}')
     return img
 
 def denoise_controlnet(
