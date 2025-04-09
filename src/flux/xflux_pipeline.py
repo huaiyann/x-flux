@@ -50,7 +50,7 @@ class XFluxPipeline:
         else:
             self.model = load_flow_model(model_type, device="cpu" if offload or custom_offload else self.device,
                                          custom_offload=custom_offload, exec_device=device)
-        # ModelOffloader(self.model, device).load()
+        ModelOffloader(self.model, device).load()
 
         clip_path = os.getenv("CLIP")
         if clip_path is None:

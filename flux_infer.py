@@ -1,7 +1,7 @@
 import torch
 from diffusers import FluxPipeline
 from torch import nn
-import time
+import time, os
 
 
 class ModelOffloaderV2:
@@ -97,4 +97,6 @@ for i in range(2):
         max_sequence_length=512,
         generator=torch.Generator("cpu").manual_seed(0)
     ).images[0]
+    ind = len(os.listdir("./results"))
+    image.save(os.path.join("./results", f"result_{ind}.png"))
     print(f'use {time.time() - start}')

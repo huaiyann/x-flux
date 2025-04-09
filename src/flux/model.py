@@ -25,7 +25,6 @@ class FluxParams:
     qkv_bias: bool
     guidance_embed: bool
 
-
 class Flux(nn.Module):
     """
     Transformer model for flow matching on sequences.
@@ -168,29 +167,29 @@ class Flux(nn.Module):
 
         forward_start = time.time()
 
-        if self.first:
-            # 将blocks以外的module、参数等都转移到GPU
-            if self.custom_offload:
-                for name, model in self.named_children():
-                    if name in ['single_blocks', 'double_blocks']:
-                        continue
-                    model.to(self.exec_device)
-            # 将blocks[0]放cuda，其他放cpu并明确为pin_memory
-            for idx, block in enumerate(self.double_blocks):
-                if idx == 0:
-                    block.to(self.exec_device)
-                    continue
-                for  p in block.parameters():
-                    p.data = p.data.cpu().pin_memory()
-                    self.param_dict[p] = p.data
-            for idx, block in enumerate(self.single_blocks):
-                if idx == 0:
-                    block.to(self.exec_device)
-                    continue
-                for p in block.parameters():
-                    p.data = p.data.cpu().pin_memory()
-                    self.param_dict[p] = p.data
-            self.first = False
+        # if self.first:
+        #     # 将blocks以外的module、参数等都转移到GPU
+        #     if self.custom_offload:
+        #         for name, model in self.named_children():
+        #             if name in ['single_blocks', 'double_blocks']:
+        #                 continue
+        #             model.to(self.exec_device)
+        #     # 将blocks[0]放cuda，其他放cpu并明确为pin_memory
+        #     for idx, block in enumerate(self.double_blocks):
+        #         if idx == 0:
+        #             block.to(self.exec_device)
+        #             continue
+        #         for  p in block.parameters():
+        #             p.data = p.data.cpu().pin_memory()
+        #             self.param_dict[p] = p.data
+        #     for idx, block in enumerate(self.single_blocks):
+        #         if idx == 0:
+        #             block.to(self.exec_device)
+        #             continue
+        #         for p in block.parameters():
+        #             p.data = p.data.cpu().pin_memory()
+        #             self.param_dict[p] = p.data
+        #     self.first = False
     
         # running on sequences img
         img = self.img_in(img)
@@ -256,11 +255,11 @@ class Flux(nn.Module):
                 )
             else:
                 # 等待自己的block加载完成
-                load_stream.synchronize()
+                # load_stream.synchronize()
                 t2 = time.time()
                 # 使用stream加载下N个block
-                current_stream = torch.cuda.current_stream()
-                load_block(self.double_blocks, index_block + 1, cur_stream=current_stream)
+                # current_stream = torch.cuda.current_stream()
+                # load_block(self.double_blocks, index_block + 1, cur_stream=current_stream)
                 t3 = time.time()
                 img, txt = block(
                     img=img, 
@@ -271,10 +270,10 @@ class Flux(nn.Module):
                     ip_scale=ip_scale, 
                 )
                 t4 = time.time()
-                if index_block > 0:
-                    for p in block.parameters():
-                        # p.data.to('meta')
-                        p.data = self.param_dict[p]
+                # if index_block > 0:
+                #     for p in block.parameters():
+                #         # p.data.to('meta')
+                #         p.data = self.param_dict[p]
                 t5 = time.time()
                 double_next_to_cuda += t3 - t2
                 double_sync_wait_cur += t2 - t1
@@ -314,18 +313,18 @@ class Flux(nn.Module):
             else:
                 t1 = time.time()
                 # 等待自己的block加载完成
-                load_stream.synchronize()
+                # load_stream.synchronize()
                 t2 = time.time()
-                current_stream = torch.cuda.current_stream()
+                # current_stream = torch.cuda.current_stream()
                 # 使用stream加载下N个block
-                load_block(self.single_blocks, index_block+1, cur_stream=current_stream)
+                # load_block(self.single_blocks, index_block+1, cur_stream=current_stream)
                 t3 = time.time()
                 # 计算
                 img = block(img, vec=vec, pe=pe)
                 t4 = time.time()
-                if index_block > 0:
-                    for p in block.parameters():
-                        p.data = self.param_dict[p]
+                # if index_block > 0:
+                #     for p in block.parameters():
+                #         p.data = self.param_dict[p]
                 t5 = time.time()
                 next_to_cuda += t3 - t2
                 sync_wait_cur += t2 - t1

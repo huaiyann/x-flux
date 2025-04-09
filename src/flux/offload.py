@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import time
+from .modules import layers
 
 class ModelOffloader:
     def __init__(self, model: nn.Module, device):
@@ -39,14 +40,14 @@ class ModelOffloader:
                 p.data = self.param_dict[p]
 
         def traverse(module: nn.Module):
-            if isinstance(module, (nn.ModuleList)): # , nn.Sequential
+            if isinstance(module, (nn.ModuleList)) and not (len(module)>0 and isinstance(module[0],layers.DoubleStreamBlock)): # , nn.Sequential
                 for i in range(len(module)):
                     current_layer = module[i]
                     next_layer = module[i + 1] if i + 1 < len(module) else None
                     current_layer.register_forward_pre_hook(create_pre_hook(next_layer))
 
                     if i == 0:  # manually move first layer params
-                        self.manual_params.extend(module[0].parameters())
+                        self.manual_params.extend(module[i].parameters())
                     else:  # don't free first layer params after forward
                         current_layer.register_forward_hook(post_hook)
 

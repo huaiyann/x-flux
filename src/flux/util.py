@@ -303,7 +303,14 @@ def load_flow_model(name: str, device: str | torch.device = "cuda", hf_download:
         sd = load_sft(ckpt_path, device=str(device))
         missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
         print_load_warning(missing, unexpected)
+    check_nan_weights(model)
     return model
+
+def check_nan_weights(model):
+    # 遍历模型的所有参数，包括子模块的参数
+    for name, param in model.named_parameters():
+        if torch.isnan(param).any():
+            print(f"NaN detected in parameter: {name}")
 
 def load_flow_model2(name: str, device: str | torch.device = "cuda", hf_download: bool = True):
     # Loading Flux
@@ -366,10 +373,10 @@ def load_t5(device: str | torch.device = "cuda", max_length: int = 512) -> HFEmb
     t5_path = os.getenv("T5")
     if t5_path is None:
         t5_path = "xlabs-ai/xflux_text_encoders"
-    # model =  HFEmbedder(t5_path, max_length=max_length, torch_dtype=torch.bfloat16)
-    # ModelOffloader(model, device).load()
-    # return model
-    return HFEmbedder(t5_path, max_length=max_length, torch_dtype=torch.bfloat16).to(device)
+    model =  HFEmbedder(t5_path, max_length=max_length, torch_dtype=torch.bfloat16)
+    ModelOffloader(model, device).load()
+    return model
+    # return HFEmbedder(t5_path, max_length=max_length, torch_dtype=torch.bfloat16).to(device)
 
 
 def load_clip(device: str | torch.device = "cuda") -> HFEmbedder:
